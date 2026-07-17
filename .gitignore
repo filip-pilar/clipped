@@ -1,0 +1,17 @@
+.DS_Store
+/.build/
+/build/
+/DerivedData/
+/*.xcodeproj/xcuserdata/
+/*.xcworkspace/xcuserdata/
+/Vendor/MediaTools/bin/
+/Vendor/MediaTools/downloads/
+/Vendor/MediaTools/build/
+/Vendor/MediaTools/yt-dlp
+/Vendor/MediaTools/deno
+/Vendor/MediaTools/ffmpeg
+/Vendor/MediaTools/ffprobe
+/Vendor/MediaTools/Licenses/
+/Vendor/MediaTools/VERSIONS.txt
+*.zip
+*.dSYM

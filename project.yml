@@ -1,0 +1,108 @@
+name: Clipped
+
+options:
+  bundleIdPrefix: com.clipped
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "26.0"
+  groupSortPosition: top
+
+settings:
+  base:
+    ARCHS: arm64
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    SWIFT_VERSION: "6.0"
+    CLANG_ENABLE_MODULES: YES
+    ENABLE_HARDENED_RUNTIME: NO
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  Clipped:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Clipped
+      - path: Resources
+        buildPhase: resources
+    postBuildScripts:
+      - name: Copy bundled media tools
+        script: |
+          "$SRCROOT/Scripts/copy-media-tools.sh"
+        basedOnDependencyAnalysis: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.clipped.Clipped
+        PRODUCT_NAME: Clipped
+        PRODUCT_MODULE_NAME: Clipped
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Clipped
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.video
+        INFOPLIST_KEY_NSHighResolutionCapable: YES
+        INFOPLIST_KEY_NSSupportsAutomaticGraphicsSwitching: YES
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+      configs:
+        Release:
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+
+  ClippedTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/ClippedTests
+    dependencies:
+      - target: Clipped
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.clipped.ClippedTests
+        GENERATE_INFOPLIST_FILE: YES
+
+  ClippedUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: Tests/ClippedUITests
+    dependencies:
+      - target: Clipped
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.clipped.ClippedUITests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Clipped
+
+schemes:
+  Clipped:
+    build:
+      targets:
+        Clipped: all
+        ClippedTests: [test]
+        ClippedUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: true
+      targets:
+        - name: ClippedTests
+          parallelizable: true
+        - name: ClippedUITests
+          parallelizable: false
+    archive:
+      config: Release
+
+  ClippedLivePipeline:
+    build:
+      targets:
+        Clipped: all
+        ClippedTests: [test]
+    test:
+      config: Debug
+      targets:
+        - name: ClippedTests
+          parallelizable: false
+      environmentVariables:
+        CLIPPED_RUN_NETWORK_TESTS: "1"
