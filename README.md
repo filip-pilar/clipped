@@ -37,10 +37,16 @@ Homebrew. Release builds require all four binaries in `Vendor/MediaTools`.
 
 ## Test
 
-Run the deterministic unit and UI suites:
+Run the deterministic unit suite:
 
 ```sh
 Scripts/test.sh
+```
+
+Run the interface smoke tests separately:
+
+```sh
+Scripts/test-ui.sh
 ```
 
 Run the opt-in live test against a public source using the bundled toolchain:

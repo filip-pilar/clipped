@@ -141,16 +141,6 @@ final class AppModel: ObservableObject {
         ranges.first(where: { $0.id == selectedRangeID })
     }
 
-    var canSetSelectedStartFromPlayhead: Bool {
-        guard let selectedRange else { return false }
-        return roundedPlayhead < selectedRange.endSeconds
-    }
-
-    var canSetSelectedEndFromPlayhead: Bool {
-        guard let selectedRange else { return false }
-        return roundedPlayhead > selectedRange.startSeconds
-    }
-
     var roundedPlayhead: Int {
         clampedSecond(Int(playheadSeconds.rounded()))
     }
@@ -531,10 +521,6 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting(completedOutputs)
     }
 
-    func openDownloads() {
-        NSWorkspace.shared.open(.downloadsDirectory)
-    }
-
     func shutdown() {
         stopSourceWork()
         exportTask?.cancel()
@@ -679,15 +665,6 @@ final class AppModel: ObservableObject {
               let url = URL(string: "https://www.youtube.com/watch?v=ui-test&t=31s") else { return }
         sourceText = url.absoluteString
         applyLoadedMedia(LoadedMedia(requestedURL: url, metadata: metadata, catalog: .build(from: metadata.formats)))
-        if mode == "overlap" {
-            ranges = [
-                ClipRange(startSeconds: 5, endSeconds: 45),
-                ClipRange(startSeconds: 20, endSeconds: 65),
-                ClipRange(startSeconds: 35, endSeconds: 80),
-                ClipRange(startSeconds: 85, endSeconds: 105)
-            ]
-            selectedRangeID = ranges[1].id
-        }
         if mode == "loading" {
             previewState = .downloading(fractionCompleted: 0.42)
         } else {

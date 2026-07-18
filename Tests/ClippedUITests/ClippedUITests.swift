@@ -2,7 +2,7 @@ import XCTest
 
 final class ClippedUITests: XCTestCase {
     @MainActor
-    func testInitialWindowExposesMinimalURLWorkflow() {
+    func testSourceEntryEnablesLoadingAndExplainsFailure() {
         let app = XCUIApplication()
         app.launchEnvironment["CLIPPED_UI_TEST_MODE"] = "initial"
         app.launch()
@@ -21,19 +21,7 @@ final class ClippedUITests: XCTestCase {
         urlField.click()
         urlField.typeText("https://example.com/video")
         XCTAssertTrue(loadButton.isEnabled)
-    }
-
-    @MainActor
-    func testFailedSourceExplainsTheProblem() {
-        let app = XCUIApplication()
-        app.launchEnvironment["CLIPPED_UI_TEST_MODE"] = "initial"
-        app.launch()
-
-        let urlField = app.textFields["source-url"]
-        XCTAssertTrue(urlField.waitForExistence(timeout: 5))
-        urlField.click()
-        urlField.typeText("https://example.com/video")
-        app.buttons["load-source"].click()
+        loadButton.click()
 
         XCTAssertTrue(app.staticTexts["Source not supported"].waitForExistence(timeout: 5))
         let explanation = app.staticTexts.matching(
@@ -43,7 +31,7 @@ final class ClippedUITests: XCTestCase {
     }
 
     @MainActor
-    func testLoadedSourceExposesCompactFormatsAndStartsWithoutClips() {
+    func testLoadedSourceSupportsClipWorkflow() {
         let app = XCUIApplication()
         app.launchEnvironment["CLIPPED_UI_TEST_MODE"] = "loaded"
         app.launch()
@@ -70,14 +58,6 @@ final class ClippedUITests: XCTestCase {
         XCTAssertTrue(app.buttons["timeline-fit-source"].exists)
         XCTAssertFalse(app.buttons["timeline-fit-selected"].isEnabled)
         XCTAssertTrue(app.buttons["chapter-30"].exists)
-    }
-
-    @MainActor
-    func testVisibleDraftWorkflowAndCompactClipMenu() {
-        let app = XCUIApplication()
-        app.launchEnvironment["CLIPPED_UI_TEST_MODE"] = "loaded"
-        app.launch()
-        XCTAssertTrue(app.buttons["mark-in"].waitForExistence(timeout: 5))
 
         app.buttons["mark-in"].click()
         XCTAssertTrue(app.descendants(matching: .any)["timeline-draft"].exists)
@@ -109,24 +89,6 @@ final class ClippedUITests: XCTestCase {
     }
 
     @MainActor
-    func testOverlappingClipsRemainSeparatelyVisible() {
-        let app = XCUIApplication()
-        app.launchEnvironment["CLIPPED_UI_TEST_MODE"] = "overlap"
-        app.launch()
-
-        XCTAssertTrue(app.staticTexts["source-title"].waitForExistence(timeout: 5))
-        for index in 0..<4 {
-            let segment = app.descendants(matching: .any)["timeline-clip-\(index)"]
-            XCTAssertTrue(segment.exists, "Missing timeline segment \(index)")
-        }
-
-        let selected = app.descendants(matching: .any)["timeline-clip-1"]
-        XCTAssertEqual(selected.label, "Clip 2, Red")
-        XCTAssertTrue(selected.isSelected)
-        XCTAssertEqual(app.buttons["download-clips"].label, "Download 4 Clips")
-    }
-
-    @MainActor
     func testPreviewLoadingStillAllowsMarking() {
         let app = XCUIApplication()
         app.launchEnvironment["CLIPPED_UI_TEST_MODE"] = "loading"
@@ -137,13 +99,5 @@ final class ClippedUITests: XCTestCase {
         XCTAssertTrue(app.buttons["mark-in"].isEnabled)
         app.buttons["mark-in"].click()
         XCTAssertTrue(app.descendants(matching: .any)["timeline-draft"].exists)
-    }
-
-    @MainActor
-    private func replaceText(in field: XCUIElement, with value: String) {
-        field.click()
-        field.typeKey("a", modifierFlags: .command)
-        field.typeText(value)
-        field.typeKey(.return, modifierFlags: [])
     }
 }

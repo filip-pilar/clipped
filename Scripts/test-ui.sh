@@ -12,5 +12,5 @@ xcodebuild \
     -destination "platform=macOS,arch=arm64" \
     -derivedDataPath "$ROOT_DIR/build/DerivedData" \
     -parallel-testing-enabled NO \
-    -only-testing:ClippedTests \
+    -only-testing:ClippedUITests \
     test
