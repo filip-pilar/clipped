@@ -5,6 +5,16 @@ struct AppIssue: Identifiable, Equatable {
     let id = UUID()
     let title: String
     let message: String
+
+    init(title: String, message: String) {
+        self.title = title
+        self.message = message
+    }
+
+    init(_ presentation: MediaFailurePresentation) {
+        title = presentation.title
+        message = presentation.alertMessage
+    }
 }
 
 @MainActor
@@ -15,12 +25,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var selectedAudio: AudioQualityChoice?
     @Published private(set) var ranges: [ClipRange] = []
     @Published var selectedRangeID: UUID?
+    @Published private(set) var playheadSeconds: Double = 0
+    @Published private(set) var draftRange: DraftRange?
+    @Published private(set) var trimSession: TrimSession?
+    @Published private(set) var editorStatusMessage: String?
+    @Published private(set) var timelineZoomRequest: TimelineZoomRequest?
 
     @Published private(set) var isLoadingMetadata = false
-    @Published private(set) var isPreparingPreview = false
-    @Published private(set) var previewProgress: PreviewPreparationProgress?
-    @Published private(set) var previewURL: URL?
-    @Published private(set) var previewErrorMessage: String?
+    @Published private(set) var previewState: PreviewState = .idle
 
     @Published private(set) var isExporting = false
     @Published private(set) var isCancellingExport = false
@@ -39,6 +51,8 @@ final class AppModel: ObservableObject {
     private var previewTask: Task<Void, Never>?
     private var exportTask: Task<Void, Never>?
     private var invalidTimecodeFields: Set<String> = []
+    private weak var undoManager: UndoManager?
+    private var keyboardMonitor: LocalKeyEventMonitor?
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         let sourceRunner = ProcessRunner()
@@ -73,10 +87,19 @@ final class AppModel: ObservableObject {
         }
 
         #if DEBUG
-        if environment["CLIPPED_UI_TEST_MODE"] == "loaded" {
-            installUITestMedia()
+        if let mode = environment["CLIPPED_UI_TEST_MODE"], mode != "initial" {
+            installUITestMedia(mode: mode)
         }
         #endif
+
+        player.timeUpdateHandler = { [weak self] seconds in
+            guard let self, self.trimSession == nil else { return }
+            self.playheadSeconds = self.clampedPlayhead(seconds)
+        }
+
+        keyboardMonitor = LocalKeyEventMonitor { [weak self] event in
+            self?.handleEditorKeyEvent(event) ?? false
+        }
     }
 
     var canLoad: Bool {
@@ -103,6 +126,35 @@ final class AppModel: ObservableObject {
         ranges.reduce(0) { $0 + max(0, $1.durationSeconds) }
     }
 
+    var chapters: [YTDLPChapter] {
+        guard let media else { return [] }
+        return media.metadata.normalizedChapters(maximumSeconds: media.maximumWholeSecond)
+    }
+
+    var canCommitDraft: Bool { draftRange?.committedRange != nil }
+    var isPreviewReady: Bool {
+        if case .ready = previewState { return true }
+        return false
+    }
+
+    var selectedRange: ClipRange? {
+        ranges.first(where: { $0.id == selectedRangeID })
+    }
+
+    var canSetSelectedStartFromPlayhead: Bool {
+        guard let selectedRange else { return false }
+        return roundedPlayhead < selectedRange.endSeconds
+    }
+
+    var canSetSelectedEndFromPlayhead: Bool {
+        guard let selectedRange else { return false }
+        return roundedPlayhead > selectedRange.startSeconds
+    }
+
+    var roundedPlayhead: Int {
+        clampedSecond(Int(playheadSeconds.rounded()))
+    }
+
     var canExport: Bool {
         guard let media, exportService != nil, !ranges.isEmpty,
               !isLoadingMetadata, !isExporting, invalidTimecodeFields.isEmpty else {
@@ -122,6 +174,7 @@ final class AppModel: ObservableObject {
 
     var exportButtonTitle: String {
         let count = ranges.count
+        if count == 0 { return "Download Clips" }
         return count == 1 ? "Download Clip" : "Download \(count) Clips"
     }
 
@@ -148,12 +201,16 @@ final class AppModel: ObservableObject {
         player.clear()
         media = nil
         ranges = []
+        selectedRangeID = nil
+        draftRange = nil
+        trimSession = nil
+        playheadSeconds = 0
+        editorStatusMessage = nil
+        undoManager?.removeAllActions(withTarget: self)
         invalidTimecodeFields.removeAll()
         completedOutputs = []
         exportProgress = nil
-        previewURL = nil
-        previewProgress = nil
-        previewErrorMessage = nil
+        previewState = .idle
         isLoadingMetadata = true
         let input = sourceText
 
@@ -170,61 +227,181 @@ final class AppModel: ObservableObject {
                 isLoadingMetadata = false
             } catch {
                 isLoadingMetadata = false
-                issue = AppIssue(title: "Couldn’t load source", message: error.localizedDescription)
+                issue = AppIssue(MediaFailurePresentation.classify(error, context: .source))
             }
         }
     }
 
-    func addRange() {
-        guard let media else { return }
-        let maximum = media.maximumWholeSecond
-        let playhead = min(maximum, max(0, Int(player.currentTime.rounded(.down))))
-        let suggested = playhead > 0 ? playhead : (ranges.last?.endSeconds ?? 0)
-        let start = min(max(0, suggested), max(0, maximum - 1))
-        let end = min(maximum, start + 10)
-        guard end > start else { return }
-        let range = ClipRange(startSeconds: start, endSeconds: end)
-        ranges.append(range)
-        selectedRangeID = range.id
+    func attachUndoManager(_ manager: UndoManager?) {
+        undoManager = manager
     }
 
     func removeRange(id: UUID) {
-        ranges.removeAll { $0.id == id }
-        invalidTimecodeFields = invalidTimecodeFields.filter { !$0.hasPrefix(id.uuidString) }
-        if selectedRangeID == id { selectedRangeID = ranges.first?.id }
-    }
-
-    func updateRange(_ updated: ClipRange) {
-        guard let index = ranges.firstIndex(where: { $0.id == updated.id }) else { return }
-        ranges[index] = updated
-    }
-
-    func updateStart(_ seconds: Int, for id: UUID) {
         guard let index = ranges.firstIndex(where: { $0.id == id }) else { return }
-        ranges[index].startSeconds = seconds
+        performEditorMutation(actionName: "Delete Clip") {
+            ranges.remove(at: index)
+            invalidTimecodeFields = invalidTimecodeFields.filter { !$0.hasPrefix(id.uuidString) }
+            if selectedRangeID == id {
+                selectedRangeID = ranges.indices.contains(index) ? ranges[index].id : ranges.last?.id
+            }
+        }
     }
 
-    func updateEnd(_ seconds: Int, for id: UUID) {
-        guard let index = ranges.firstIndex(where: { $0.id == id }) else { return }
-        ranges[index].endSeconds = seconds
+    func removeSelectedRange() {
+        guard let selectedRangeID else { return }
+        removeRange(id: selectedRangeID)
+    }
+
+    func selectRange(id: UUID) {
+        guard ranges.contains(where: { $0.id == id }) else { return }
+        selectedRangeID = id
+    }
+
+    @discardableResult
+    func commitStart(_ seconds: Int, for id: UUID) -> Bool {
+        guard let index = ranges.firstIndex(where: { $0.id == id }),
+              seconds >= 0, seconds < ranges[index].endSeconds else { return false }
+        let value = clampedSecond(seconds)
+        guard value < ranges[index].endSeconds else { return false }
+        performEditorMutation(actionName: "Change Clip Start") {
+            ranges[index].startSeconds = value
+        }
+        return true
+    }
+
+    @discardableResult
+    func commitEnd(_ seconds: Int, for id: UUID) -> Bool {
+        guard let index = ranges.firstIndex(where: { $0.id == id }),
+              seconds > ranges[index].startSeconds,
+              let media, seconds <= media.maximumWholeSecond else { return false }
+        performEditorMutation(actionName: "Change Clip End") {
+            ranges[index].endSeconds = seconds
+        }
+        return true
     }
 
     func setStartToPlayhead(for id: UUID) {
-        guard let media, let index = ranges.firstIndex(where: { $0.id == id }) else { return }
-        let value = min(max(0, Int(player.currentTime.rounded())), max(0, media.maximumWholeSecond - 1))
-        ranges[index].startSeconds = value
-        if ranges[index].endSeconds <= value {
-            ranges[index].endSeconds = min(media.maximumWholeSecond, value + 10)
-        }
+        _ = commitStart(roundedPlayhead, for: id)
     }
 
     func setEndToPlayhead(for id: UUID) {
-        guard let media, let index = ranges.firstIndex(where: { $0.id == id }) else { return }
-        let value = min(media.maximumWholeSecond, max(1, Int(player.currentTime.rounded())))
-        ranges[index].endSeconds = value
-        if ranges[index].startSeconds >= value {
-            ranges[index].startSeconds = max(0, value - 10)
+        _ = commitEnd(roundedPlayhead, for: id)
+    }
+
+    func duplicateRange(id: UUID) {
+        guard let index = ranges.firstIndex(where: { $0.id == id }) else { return }
+        let copy = ClipRange(
+            startSeconds: ranges[index].startSeconds,
+            endSeconds: ranges[index].endSeconds
+        )
+        performEditorMutation(actionName: "Duplicate Clip") {
+            ranges.insert(copy, at: index + 1)
+            selectedRangeID = copy.id
         }
+    }
+
+    func markIn() {
+        guard media != nil else { return }
+        performEditorMutation(actionName: "Mark In") {
+            let out = draftRange?.outSeconds
+            draftRange = DraftRange(
+                inSeconds: roundedPlayhead,
+                outSeconds: out.flatMap { $0 > roundedPlayhead ? $0 : nil }
+            )
+            editorStatusMessage = "In marked at \(Timecode.display(roundedPlayhead))"
+        }
+    }
+
+    func markOut() {
+        guard var draftRange else {
+            editorStatusMessage = "Mark In before marking Out."
+            return
+        }
+        guard roundedPlayhead > draftRange.inSeconds else {
+            editorStatusMessage = "Out must be after In."
+            return
+        }
+        performEditorMutation(actionName: "Mark Out") {
+            draftRange.outSeconds = roundedPlayhead
+            self.draftRange = draftRange
+            editorStatusMessage = "Out marked at \(Timecode.display(roundedPlayhead))"
+        }
+    }
+
+    func commitDraft() {
+        guard let range = draftRange?.committedRange else { return }
+        performEditorMutation(actionName: "Add Clip") {
+            ranges.append(range)
+            selectedRangeID = range.id
+            draftRange = nil
+            editorStatusMessage = "Clip added."
+        }
+    }
+
+    func cancelDraftOrTrim() {
+        if trimSession != nil {
+            cancelTrim()
+        } else if draftRange != nil {
+            draftRange = nil
+            editorStatusMessage = "Draft cancelled."
+        }
+    }
+
+    func beginTrim(id: UUID, edge: ClipEdge) {
+        guard trimSession == nil,
+              let range = ranges.first(where: { $0.id == id }) else { return }
+        selectedRangeID = id
+        let wasPlaying = player.pause()
+        let boundary = edge == .start ? range.startSeconds : range.endSeconds
+        trimSession = TrimSession(
+            clipID: id,
+            edge: edge,
+            originalRange: range,
+            savedPlayhead: playheadSeconds,
+            wasPlaying: wasPlaying,
+            boundarySeconds: boundary
+        )
+    }
+
+    func updateTrim(to seconds: Int) {
+        guard var session = trimSession,
+              let index = ranges.firstIndex(where: { $0.id == session.clipID }),
+              let media else { return }
+        let boundary: Int
+        switch session.edge {
+        case .start:
+            boundary = min(max(0, seconds), ranges[index].endSeconds - 1)
+            ranges[index].startSeconds = boundary
+        case .end:
+            boundary = max(ranges[index].startSeconds + 1, min(media.maximumWholeSecond, seconds))
+            ranges[index].endSeconds = boundary
+        }
+        session.boundarySeconds = boundary
+        trimSession = session
+        player.showBoundaryFrame(at: Double(boundary))
+    }
+
+    func endTrim() {
+        guard let session = trimSession else { return }
+        trimSession = nil
+        player.restorePreview(to: session.savedPlayhead, resumePlayback: session.wasPlaying)
+        guard let current = ranges.first(where: { $0.id == session.clipID }),
+              current != session.originalRange else { return }
+
+        var before = editorSnapshot
+        if let index = before.ranges.firstIndex(where: { $0.id == session.clipID }) {
+            before.ranges[index] = session.originalRange
+        }
+        registerUndo(to: before, actionName: "Trim Clip")
+    }
+
+    func cancelTrim() {
+        guard let session = trimSession else { return }
+        if let index = ranges.firstIndex(where: { $0.id == session.clipID }) {
+            ranges[index] = session.originalRange
+        }
+        trimSession = nil
+        player.restorePreview(to: session.savedPlayhead, resumePlayback: session.wasPlaying)
     }
 
     func setTimecodeFieldValidity(key: String, isValid: Bool) {
@@ -247,7 +424,57 @@ final class AppModel: ObservableObject {
     }
 
     func seek(to seconds: Int) {
-        player.seek(to: Double(seconds))
+        seek(to: Double(seconds))
+    }
+
+    func seek(to seconds: Double) {
+        let value = clampedPlayhead(seconds)
+        playheadSeconds = value
+        if isPreviewReady { player.seek(to: value) }
+    }
+
+    func movePlayhead(by seconds: Int) {
+        seek(to: playheadSeconds + Double(seconds))
+    }
+
+    func togglePlayback() {
+        guard isPreviewReady, trimSession == nil else { return }
+        player.togglePlayback()
+    }
+
+    private func handleEditorKeyEvent(_ event: NSEvent) -> Bool {
+        if let eventWindow = event.window, eventWindow !== NSApp.keyWindow { return false }
+        guard media != nil, !(NSApp.keyWindow?.firstResponder is NSTextView) else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let commandLike = modifiers.intersection([.command, .control, .option])
+
+        if modifiers.contains(.command),
+           modifiers.intersection([.control, .option]).isEmpty {
+            switch event.charactersIgnoringModifiers {
+            case "=", "+": timelineZoomRequest = TimelineZoomRequest(action: .zoomIn); return true
+            case "-": timelineZoomRequest = TimelineZoomRequest(action: .zoomOut); return true
+            default: return false
+            }
+        }
+
+        guard commandLike.isEmpty else { return false }
+        switch event.keyCode {
+        case 49: togglePlayback(); return true
+        case 123: movePlayhead(by: modifiers.contains(.shift) ? -5 : -1); return true
+        case 124: movePlayhead(by: modifiers.contains(.shift) ? 5 : 1); return true
+        case 34: markIn(); return true
+        case 31: markOut(); return true
+        case 36, 76:
+            guard canCommitDraft else { return false }
+            commitDraft(); return true
+        case 51, 117:
+            guard selectedRangeID != nil else { return false }
+            removeSelectedRange(); return true
+        case 53:
+            guard trimSession != nil || draftRange != nil else { return false }
+            cancelDraftOrTrim(); return true
+        default: return false
+        }
     }
 
     func export() {
@@ -287,7 +514,7 @@ final class AppModel: ObservableObject {
             } catch {
                 isExporting = false
                 isCancellingExport = false
-                issue = AppIssue(title: "Export stopped", message: error.localizedDescription)
+                issue = AppIssue(MediaFailurePresentation.classify(error, context: .export))
             }
         }
     }
@@ -322,35 +549,47 @@ final class AppModel: ObservableObject {
         media = loaded
         selectedVideo = loaded.catalog.defaultVideoChoice
         selectedAudio = loaded.catalog.defaultAudioChoice
-        let end = min(10, loaded.maximumWholeSecond)
-        let initial = ClipRange(startSeconds: 0, endSeconds: max(1, end))
-        ranges = [initial]
-        selectedRangeID = initial.id
+        ranges = []
+        selectedRangeID = nil
+        draftRange = nil
+        trimSession = nil
+        playheadSeconds = Double(
+            YouTubeTimestamp.initialSeconds(
+                metadataStartTime: loaded.metadata.startTime,
+                url: loaded.requestedURL,
+                maximumSeconds: loaded.maximumWholeSecond
+            )
+        )
+        player.configure(duration: loaded.metadata.duration ?? 0)
+        editorStatusMessage = nil
+        undoManager?.removeAllActions(withTarget: self)
     }
 
     private func preparePreview(for loaded: LoadedMedia) {
         guard let previewService else { return }
-        isPreparingPreview = true
-        previewErrorMessage = nil
+        previewState = .downloading(fractionCompleted: nil)
         previewTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let url = try await previewService.prepare(media: loaded) { [weak self] progress in
                     Task { @MainActor in
                         guard let self, self.media?.requestedURL == loaded.requestedURL else { return }
-                        self.previewProgress = progress
+                        self.previewState = .progress(progress)
                     }
                 }
                 try Task.checkCancellation()
                 guard media?.requestedURL == loaded.requestedURL else { return }
-                previewURL = url
-                isPreparingPreview = false
-                player.load(url: url, duration: loaded.metadata.duration ?? 0)
+                previewState = .ready(url)
+                player.load(
+                    url: url,
+                    duration: loaded.metadata.duration ?? 0,
+                    initialTime: playheadSeconds
+                )
             } catch is CancellationError {
-                isPreparingPreview = false
+                // Loading another source owns the next preview state.
             } catch {
-                isPreparingPreview = false
-                previewErrorMessage = error.localizedDescription
+                guard media?.requestedURL == loaded.requestedURL else { return }
+                previewState = .failed(MediaFailurePresentation.classify(error, context: .preview))
             }
         }
     }
@@ -360,6 +599,47 @@ final class AppModel: ObservableObject {
         previewTask?.cancel()
         sourceTask = nil
         previewTask = nil
+    }
+
+    private var editorSnapshot: EditorSnapshot {
+        EditorSnapshot(ranges: ranges, selectedRangeID: selectedRangeID, draftRange: draftRange)
+    }
+
+    private func performEditorMutation(actionName: String, _ mutation: () -> Void) {
+        let before = editorSnapshot
+        mutation()
+        guard before != editorSnapshot else { return }
+        registerUndo(to: before, actionName: actionName)
+    }
+
+    private func registerUndo(to snapshot: EditorSnapshot, actionName: String) {
+        guard let undoManager else { return }
+        let ownsGroup = !undoManager.isUndoing && !undoManager.isRedoing
+        if ownsGroup { undoManager.beginUndoGrouping() }
+        undoManager.registerUndo(withTarget: self) { target in
+            let inverse = target.editorSnapshot
+            target.apply(snapshot: snapshot)
+            target.registerUndo(to: inverse, actionName: actionName)
+        }
+        undoManager.setActionName(actionName)
+        if ownsGroup { undoManager.endUndoGrouping() }
+    }
+
+    private func apply(snapshot: EditorSnapshot) {
+        ranges = snapshot.ranges
+        selectedRangeID = snapshot.selectedRangeID
+        draftRange = snapshot.draftRange
+        invalidTimecodeFields = invalidTimecodeFields.filter { key in
+            ranges.contains { key.hasPrefix($0.id.uuidString) }
+        }
+    }
+
+    private func clampedPlayhead(_ seconds: Double) -> Double {
+        min(Double(media?.maximumWholeSecond ?? Int.max), max(0, seconds))
+    }
+
+    private func clampedSecond(_ seconds: Int) -> Int {
+        min(media?.maximumWholeSecond ?? seconds, max(0, seconds))
     }
 
     private static func resolveTools(environment: [String: String]) throws -> ToolPaths {
@@ -373,15 +653,20 @@ final class AppModel: ObservableObject {
     }
 
     #if DEBUG
-    private func installUITestMedia() {
+    private func installUITestMedia(mode: String) {
         let json = #"""
         {
           "id":"ui-test",
           "title":"City Lights — Camera Test",
           "duration":122,
-          "webpage_url":"https://example.com/video",
+          "webpage_url":"https://www.youtube.com/watch?v=ui-test&t=31s",
           "extractor":"test",
           "extractor_key":"Test",
+          "chapters":[
+            {"title":"Opening","start_time":0,"end_time":30},
+            {"title":"Main section","start_time":30,"end_time":90},
+            {"title":"Closing","start_time":90,"end_time":122}
+          ],
           "formats":[
             {"format_id":"299","ext":"mp4","vcodec":"avc1.64002a","acodec":"none","width":1920,"height":1080,"fps":60,"filesize_approx":90000000,"vbr":4500,"dynamic_range":"SDR"},
             {"format_id":"22","ext":"mp4","vcodec":"avc1.64001f","acodec":"mp4a.40.2","width":1280,"height":720,"fps":30,"filesize_approx":42000000,"vbr":2200,"abr":128,"audio_channels":2,"dynamic_range":"SDR"},
@@ -391,10 +676,30 @@ final class AppModel: ObservableObject {
         }
         """#
         guard let metadata = try? JSONDecoder().decode(YTDLPMetadata.self, from: Data(json.utf8)),
-              let url = URL(string: "https://example.com/video") else { return }
+              let url = URL(string: "https://www.youtube.com/watch?v=ui-test&t=31s") else { return }
         sourceText = url.absoluteString
         applyLoadedMedia(LoadedMedia(requestedURL: url, metadata: metadata, catalog: .build(from: metadata.formats)))
-        previewErrorMessage = "Preview is disabled during interface tests."
+        if mode == "overlap" {
+            ranges = [
+                ClipRange(startSeconds: 5, endSeconds: 45),
+                ClipRange(startSeconds: 20, endSeconds: 65),
+                ClipRange(startSeconds: 35, endSeconds: 80),
+                ClipRange(startSeconds: 85, endSeconds: 105)
+            ]
+            selectedRangeID = ranges[1].id
+        }
+        if mode == "loading" {
+            previewState = .downloading(fractionCompleted: 0.42)
+        } else {
+            previewState = .failed(
+                MediaFailurePresentation(
+                    kind: .unsupported,
+                    title: "Preview unavailable",
+                    message: "Preview is disabled during interface tests.",
+                    diagnostic: nil
+                )
+            )
+        }
     }
     #endif
 }

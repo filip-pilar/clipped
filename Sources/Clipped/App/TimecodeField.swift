@@ -4,7 +4,7 @@ struct TimecodeField: View {
     let value: Int
     let fieldKey: String
     let accessibilityIdentifier: String
-    let onCommit: (Int) -> Void
+    let onCommit: (Int) -> Bool
     let onValidityChange: (Bool) -> Void
 
     @State private var text: String
@@ -15,7 +15,7 @@ struct TimecodeField: View {
         value: Int,
         fieldKey: String,
         accessibilityIdentifier: String,
-        onCommit: @escaping (Int) -> Void,
+        onCommit: @escaping (Int) -> Bool,
         onValidityChange: @escaping (Bool) -> Void
     ) {
         self.value = value
@@ -41,7 +41,10 @@ struct TimecodeField: View {
             .focused($isFocused)
             .onSubmit(commit)
             .onChange(of: isFocused) { _, focused in
-                if !focused { commit() }
+                if !focused {
+                    if isValid { commit() }
+                    else { revert() }
+                }
             }
             .onChange(of: value) { _, newValue in
                 if !isFocused {
@@ -51,12 +54,12 @@ struct TimecodeField: View {
             }
             .onChange(of: text) { _, newText in
                 guard isFocused else { return }
-                if let seconds = try? Timecode.parse(newText) {
-                    onCommit(seconds)
-                    setValidity(true)
-                } else {
-                    setValidity(false)
-                }
+                setValidity((try? Timecode.parse(newText)) != nil)
+            }
+            .onKeyPress(.escape) {
+                revert()
+                isFocused = false
+                return .handled
             }
             .accessibilityIdentifier(accessibilityIdentifier)
             .help(isValid ? "Seconds, MM:SS, or HH:MM:SS" : "Use seconds, MM:SS, or HH:MM:SS")
@@ -65,12 +68,20 @@ struct TimecodeField: View {
     private func commit() {
         do {
             let seconds = try Timecode.parse(text)
-            onCommit(seconds)
+            guard onCommit(seconds) else {
+                setValidity(false)
+                return
+            }
             text = Timecode.display(seconds)
             setValidity(true)
         } catch {
             setValidity(false)
         }
+    }
+
+    private func revert() {
+        text = Timecode.display(value)
+        setValidity(true)
     }
 
     private func setValidity(_ valid: Bool) {

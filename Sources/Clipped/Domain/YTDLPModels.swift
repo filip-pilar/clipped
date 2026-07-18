@@ -10,6 +10,8 @@ struct YTDLPMetadata: Decodable, Equatable, Sendable {
     let extractorKey: String?
     let thumbnail: String?
     let liveStatus: String?
+    let startTime: Double?
+    let chapters: [YTDLPChapter]
     let formats: [YTDLPFormat]
 
     enum CodingKeys: String, CodingKey {
@@ -22,7 +24,25 @@ struct YTDLPMetadata: Decodable, Equatable, Sendable {
         case extractorKey = "extractor_key"
         case thumbnail
         case liveStatus = "live_status"
+        case startTime = "start_time"
+        case chapters
         case formats
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        duration = try container.decodeIfPresent(Double.self, forKey: .duration)
+        webpageURL = try container.decodeIfPresent(String.self, forKey: .webpageURL)
+        originalURL = try container.decodeIfPresent(String.self, forKey: .originalURL)
+        extractor = try container.decodeIfPresent(String.self, forKey: .extractor)
+        extractorKey = try container.decodeIfPresent(String.self, forKey: .extractorKey)
+        thumbnail = try container.decodeIfPresent(String.self, forKey: .thumbnail)
+        liveStatus = try container.decodeIfPresent(String.self, forKey: .liveStatus)
+        startTime = try container.decodeIfPresent(Double.self, forKey: .startTime)
+        chapters = try container.decodeIfPresent([YTDLPChapter].self, forKey: .chapters) ?? []
+        formats = try container.decodeIfPresent([YTDLPFormat].self, forKey: .formats) ?? []
     }
 
     var isLive: Bool {
@@ -31,6 +51,34 @@ struct YTDLPMetadata: Decodable, Equatable, Sendable {
 
     var isAudioOnly: Bool {
         !formats.contains(where: \.containsVideo)
+    }
+
+    func normalizedChapters(maximumSeconds: Int) -> [YTDLPChapter] {
+        chapters.compactMap { chapter in
+            guard chapter.startTime.isFinite,
+                  chapter.startTime >= 0,
+                  chapter.endTime?.isFinite != false else { return nil }
+            let start = min(maximumSeconds, max(0, Int(chapter.startTime.rounded())))
+            let rawEnd = chapter.endTime.map { Int($0.rounded()) }
+            let end = rawEnd.map { min(maximumSeconds, max(start, $0)) }
+            guard start < maximumSeconds else { return nil }
+            return YTDLPChapter(title: chapter.title, startTime: Double(start), endTime: end.map(Double.init))
+        }
+        .sorted { $0.startTime < $1.startTime }
+    }
+}
+
+struct YTDLPChapter: Decodable, Equatable, Sendable, Identifiable {
+    let title: String?
+    let startTime: Double
+    let endTime: Double?
+
+    var id: String { "\(startTime)-\(title ?? "")" }
+
+    enum CodingKeys: String, CodingKey {
+        case title
+        case startTime = "start_time"
+        case endTime = "end_time"
     }
 }
 
