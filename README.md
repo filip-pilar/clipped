@@ -1,8 +1,8 @@
 # Clipped
 
-Turn selected ranges from online video and audio into editing-ready clips.
-Clipped is a native macOS app: paste a URL, mark the parts you want, and download
-them as separate files.
+Clipped is a minimal native macOS app for turning timestamp ranges from an
+online video or audio source into separate editing-ready files. The product name
+is provisional.
 
 Paste one URL, choose any qualities exposed by that source, select one or more
 ranges with the player, timeline, or timecode fields, and download. Video output
