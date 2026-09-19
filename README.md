@@ -1,14 +1,39 @@
 # Clipped
 
-Clipped is a minimal native macOS app for turning timestamp ranges from an
-online video or audio source into separate editing-ready files. The product name
-is provisional.
+Turn selected ranges from online video and audio into editing-ready clips.
+Clipped is a native macOS app: paste a URL, mark the parts you want, and download
+them as separate files.
 
 Paste one URL, choose any qualities exposed by that source, select one or more
 ranges with the player, timeline, or timecode fields, and download. Video output
 is H.264/AAC MP4; audio-only output is AAC M4A. Files are written to Downloads.
 
+## Download and try it
+
+The [v0.1.0 public preview](https://github.com/filip-pilar/clipped/releases/tag/v0.1.0)
+runs on **Apple Silicon Macs with macOS 15 or newer**. You do not need Xcode or
+developer tools to use the packaged app.
+
+1. [Download Clipped for Apple Silicon](https://github.com/filip-pilar/clipped/releases/download/v0.1.0/Clipped-apple-silicon.zip).
+2. Unzip it and move `Clipped.app` to Applications.
+3. On first launch, Control-click the app and choose **Open**.
+
+The preview is not notarized by Apple. If macOS blocks it, review the warning
+and use **System Settings → Privacy & Security → Open Anyway** only if you trust
+the download.
+
+### Make your first clip
+
+1. Paste a video or audio URL.
+2. Choose an available quality or audio-only output.
+3. Select one or more ranges with the player, timeline, or timecode fields.
+4. Download the clips and find the resulting MP4 or M4A files in Downloads.
+
+Want to build or contribute? Continue with the requirements below.
+
 ## Requirements
+
+These requirements are for building from source:
 
 - Apple Silicon Mac
 - macOS 15 or newer
